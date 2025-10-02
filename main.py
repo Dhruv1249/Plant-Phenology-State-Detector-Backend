@@ -7,7 +7,7 @@ from typing import List, Tuple
 import random
 import logging
 import rasterio
-from shapely.geometry import Point, Polygon as ShapelyPolygon
+from shapely.geometry import Point, Polygon as ShapelyPolygon, MultiPoint
 
 # --- Basic Setup ---
 logging.basicConfig(level=logging.INFO)
@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="KaalNetra API",
     description="Geospatial analysis for ecology prediction",
-    version="1.4.0" # Updated to standard Köppen
+    version="1.5.0" # Per-biome centroids
 )
 
 app.add_middleware(
@@ -38,21 +38,11 @@ def mock_rad_model(lat: float, lng: float, month: int, year: int) -> float:
     return round(random.uniform(150, 250), 1)
 
 def mock_final_species_model(temp: float, precip: float, rad: float, biome: str) -> dict:
-    species_list = [
-        {'scientific_name': 'Rhamnus cathartica', 'common_name': 'common buckthorn', 'phenophase': 'Fruiting'},
-        {'scientific_name': 'Chamaenerion angustifolium', 'common_name': 'fireweed', 'phenophase': 'Fruiting'},
-        {'scientific_name': 'Acer negundo', 'common_name': 'box elder', 'phenophase': 'Fruiting'},
-    ]
-    pests_list = [
-        {'scientific_name_pest': 'Agrilus planipennis', 'common_name_pest': 'Emerald Ash Borer'}
-    ]
-    return {
-        "species": random.sample(species_list, k=random.randint(2, 3)),
-        "pests": random.sample(pests_list, k=1)
-    }
+    species_list = [{'scientific_name': 'Rhamnus cathartica', 'common_name': 'common buckthorn', 'phenophase': 'Fruiting'}, {'scientific_name': 'Acer negundo', 'common_name': 'box elder', 'phenophase': 'Fruiting'}]
+    pests_list = [{'scientific_name_pest': 'Agrilus planipennis', 'common_name_pest': 'Emerald Ash Borer'}]
+    return {"species": random.sample(species_list, k=2), "pests": pests_list}
 
-# --- Standard Köppen Classification Dictionary ---
-# This dictionary maps the numeric code from the .tif file to the detailed 3-letter code and name.
+# --- Standard Köppen Classification Dictionary (Unchanged) ---
 KOPPEN_CLASSES = {
     1: ("Af", "Tropical rainforest"), 2: ("Am", "Tropical monsoon"), 3: ("Aw", "Tropical savanna"),
     4: ("BWh", "Hot desert"), 5: ("BWk", "Cold desert"), 6: ("BSh", "Hot semi-arid"),
@@ -66,17 +56,11 @@ KOPPEN_CLASSES = {
     26: ("Dfd", "Severely cold subarctic"), 27: ("ET", "Tundra"), 28: ("EF", "Ice cap")
 }
 
-# --- UPDATED Helper to use the standard dictionary ---
 def get_koppen_biome(lat: float, lng: float, raster_file="koppen.tif") -> Tuple[str, str]:
-    """
-    Extracts the numeric value from the raster file and looks it up in the standard KOPPEN_CLASSES dictionary.
-    """
     try:
         with rasterio.open(raster_file) as src:
-            # Rasterio uses (x, y) which corresponds to (lng, lat)
             for val in src.sample([(lng, lat)]):
                 class_id = int(val[0])
-                # Use the dictionary for a direct lookup, with a fallback for unknown codes
                 return KOPPEN_CLASSES.get(class_id, ("Unknown", "Unknown"))
     except Exception as e:
         logger.error(f"Could not read from raster file: {e}")
@@ -88,7 +72,7 @@ class AnalysisRequest(BaseModel):
     month: int = Field(..., ge=1, le=12)
     year: int = Field(..., ge=1980, le=2099)
 
-# --- Endpoints (The logic is unchanged, but now uses the detailed biome data) ---
+# --- Endpoints ---
 @app.get("/")
 async def root():
     return {"status": "KaalNetra API is online"}
@@ -97,48 +81,48 @@ async def root():
 async def analyze_area_by_biome(request: AnalysisRequest):
     try:
         shape_polygon = ShapelyPolygon([(lng, lat) for lat, lng in request.shape_points])
-        centroid = shape_polygon.centroid
         min_lng, min_lat, max_lng, max_lat = shape_polygon.bounds
 
-        sample_points = 200
-        points_by_biome = {}
+        # 1. Group sample points by their biome
+        sample_points = 500  # Increased for better centroid accuracy
+        biome_point_groups = {}
         for _ in range(sample_points):
-            point_lng = random.uniform(min_lng, max_lng)
-            point_lat = random.uniform(min_lat, max_lat)
+            point_lng, point_lat = (random.uniform(min_lng, max_lng), random.uniform(min_lat, max_lat))
             if shape_polygon.contains(Point(point_lng, point_lat)):
-                # This call now uses the standard get_koppen_biome function
                 biome_code, biome_name = get_koppen_biome(point_lat, point_lng)
-                if biome_code not in points_by_biome and biome_code not in ["Unknown", "Error"]:
-                    points_by_biome[biome_code] = {
-                        "name": biome_name,
-                        "representative_point": (point_lat, point_lng)
-                    }
+                if biome_code not in ["Unknown", "Error"]:
+                    if biome_code not in biome_point_groups:
+                        biome_point_groups[biome_code] = {"name": biome_name, "points": []}
+                    biome_point_groups[biome_code]["points"].append((point_lng, point_lat))
         
-        if not points_by_biome:
+        if not biome_point_groups:
             raise HTTPException(status_code=400, detail="No valid biomes found in the selected area.")
 
+        # 2. Calculate centroid and run analysis for each biome group
         analysis_results = []
-        for biome_code, data in points_by_biome.items():
-            rep_lat, rep_lng = data["representative_point"]
+        for biome_code, data in biome_point_groups.items():
+            if not data["points"]: continue
             
+            # Calculate the centroid of this biome's points
+            biome_multipoint = MultiPoint(data["points"])
+            biome_centroid = biome_multipoint.centroid
+            rep_lat, rep_lng = biome_centroid.y, biome_centroid.x
+
             temp = mock_temp_model(rep_lat, rep_lng, request.month, request.year)
             precip = mock_precip_model(rep_lat, rep_lng, request.month, request.year)
             rad = mock_rad_model(rep_lat, rep_lng, request.month, request.year)
-            
             species_result = mock_final_species_model(temp, precip, rad, biome_code)
             
             analysis_results.append({
                 "biome": biome_code,
                 "biome_name": data["name"],
-                "climate_data": { "temperature": temp, "precipitation": precip, "radiation": rad },
+                "location": {"lat": rep_lat, "lng": rep_lng}, # <-- NEW location property
+                "climate_data": {"temperature": temp, "precipitation": precip, "radiation": rad},
                 "species": species_result["species"],
                 "pests": species_result["pests"]
             })
 
-        return {
-            "centroid": {"lat": centroid.y, "lng": centroid.x},
-            "results": analysis_results
-        }
+        return {"results": analysis_results}
     except Exception as e:
         logger.error(f"Analysis failed: {e}")
         raise HTTPException(status_code=500, detail="An error occurred during analysis.")
