@@ -4,3 +4,6 @@ shapely
 rasterio
 gunicorn
 scikit-learn
+numpy
+pandas 
+xgboost
