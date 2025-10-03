@@ -26,7 +26,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000","http://localhost:3001","http://localhost:3002"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -122,7 +122,7 @@ def predict_ecology_from_data(
     doy_sin = np.sin(2 * np.pi * doy / 365.25)
     doy_cos = np.cos(2 * np.pi * doy / 365.25)
     temp_x_radiation = temp_k * rad
-    drought_index = precip_raw / temp_k if temp_k > 0 else 0 
+    drought_index = temp_k / (precip_raw + 1) 
 
     data = {
         'latitude': lat,
@@ -156,15 +156,23 @@ def predict_ecology_from_data(
     
     plant_scientific_names = scenario_to_plants.get(scenario_text, [])
     species_list = []
+    
+    # <-- CORRECTED: Safely access the nested 'plant_names' dictionary
+    plant_name_dict = name_lookups.get('plant_names', {})
     for plant_name in plant_scientific_names:
         species_list.append({
             'scientific_name': plant_name,
-            'common_name': name_lookups.get(plant_name, "Unknown"),
+            # <-- CORRECTED: Look up the stripped name in the nested dictionary
+            'common_name': plant_name_dict.get(plant_name.strip(), "Unknown"),
             'phenophase': phenophase
         })
+        
+    # <-- CORRECTED: Safely access the nested 'pest_names' dictionary
+    pest_name_dict = name_lookups.get('pest_names', {})
     pests_list = [{
         'scientific_name_pest': pest_scientific_name,
-        'common_name_pest': name_lookups.get(pest_scientific_name, "Unknown")
+        # <-- CORRECTED: Look up the stripped name in the nested dictionary
+        'common_name_pest': pest_name_dict.get(pest_scientific_name.strip(), "Unknown")
     }]
     return {"species": species_list, "pests": pests_list}
 
