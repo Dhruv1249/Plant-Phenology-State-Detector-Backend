@@ -13,7 +13,8 @@ import pandas as pd
 from datetime import datetime
 import xgboost as xgb
 import numpy as np
-import random 
+import random
+
 # --- Basic Setup ---
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -21,35 +22,29 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="KaalNetra API",
     description="Geospatial analysis for ecology prediction",
-    version="3.0.0" # Production-ready feature engineering
+    version="3.1.0" # Added phenology timing model
 )
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000","http://localhost:3001","http://localhost:3002"],
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000","http://localhost:3001","http://localhost:3002","https://plant-phenology-state-detector.vercel.app/"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # --- Model Constants ---
-
-# Define the exact feature order the ecology model expects
 MODEL_FEATURE_ORDER = [
-    'latitude', 'longitude', 'T2M', 'PRECTOTCORR', 'SWGDN', 'biome_cat_Af', 
-    'biome_cat_Am', 'biome_cat_Aw', 'biome_cat_BSh', 'biome_cat_BSk', 
-    'biome_cat_BWh', 'biome_cat_BWk', 'biome_cat_Cfa', 'biome_cat_Cfb', 
-    'biome_cat_Cfc', 'biome_cat_Csa', 'biome_cat_Csb', 'biome_cat_Cwa', 
-    'biome_cat_Cwb', 'biome_cat_Dfa', 'biome_cat_Dfc', 'biome_cat_Dfd', 
-    'biome_cat_Dsa', 'biome_cat_Dsb', 'biome_cat_Dsc', 'biome_cat_Dsd', 
-    'biome_cat_Dwa', 'biome_cat_Dwc', 'biome_cat_Dwd', 'biome_cat_ET', 
+    'latitude', 'longitude', 'T2M', 'PRECTOTCORR', 'SWGDN', 'biome_cat_Af',
+    'biome_cat_Am', 'biome_cat_Aw', 'biome_cat_BSh', 'biome_cat_BSk',
+    'biome_cat_BWh', 'biome_cat_BWk', 'biome_cat_Cfa', 'biome_cat_Cfb',
+    'biome_cat_Cfc', 'biome_cat_Csa', 'biome_cat_Csb', 'biome_cat_Cwa',
+    'biome_cat_Cwb', 'biome_cat_Dfa', 'biome_cat_Dfc', 'biome_cat_Dfd',
+    'biome_cat_Dsa', 'biome_cat_Dsb', 'biome_cat_Dsc', 'biome_cat_Dsd',
+    'biome_cat_Dwa', 'biome_cat_Dwc', 'biome_cat_Dwd', 'biome_cat_ET',
     'biome_cat_Unknown', 'doy_sin', 'doy_cos', 'temp_x_radiation', 'drought_index'
 ]
-
-# Extract all possible biome codes from the feature list for one-hot encoding
 ALL_BIOME_CODES = [code for col in MODEL_FEATURE_ORDER if (code := col.replace('biome_cat_', '')) != col]
-
-# Standard Köppen Classification Dictionary
 KOPPEN_CLASSES = {
     1: ("Af", "Tropical rainforest"), 2: ("Am", "Tropical monsoon"), 3: ("Aw", "Tropical savanna"),
     4: ("BWh", "Hot desert"), 5: ("BWk", "Cold desert"), 6: ("BSh", "Hot semi-arid"),
@@ -62,7 +57,6 @@ KOPPEN_CLASSES = {
     23: ("Dfa", "Hot-summer humid continental"), 24: ("Dfb", "Warm-summer humid continental"), 25: ("Dfc", "Subarctic"),
     26: ("Dfd", "Severely cold subarctic"), 27: ("ET", "Tundra"), 28: ("EF", "Ice cap")
 }
-
 
 # --- Load ML Models and Lookups on Startup ---
 try:
@@ -79,6 +73,13 @@ try:
     rad_model = xgb.XGBRegressor()
     rad_model.load_model("models/rad_model.json")
 
+    # <-- NEW: Load the plant timing model and its encoders
+    plant_timing_model = joblib.load('models/plant_model.joblib')
+    species_cats = joblib.load('models/species_cats.joblib')
+    phenophase_cats = joblib.load('models/phenophase_cats.joblib')
+    biome_cats = joblib.load('models/biome_cats.joblib')
+    # <-- END NEW
+
     # JSON Lookups
     with open('models/scenario_to_plants_lookup.json') as f:
         scenario_to_plants = json.load(f)
@@ -87,91 +88,98 @@ try:
     logger.info("All assets loaded successfully.")
 except Exception as e:
     logger.error(f"FATAL: A required model file was not found or failed to load. Please check the 'models' directory. Details: {e}")
-    combined_model = None # Prevent app from running if models are missing
-
+    combined_model = None
 
 # --- ML Prediction Functions ---
 
 def predict_temperature_k(lat: float, lng: float, month: int, year: int) -> float:
-    """Predicts temperature and returns it in Kelvin."""
     input_df = pd.DataFrame([[lat, lng, month, year]], columns=['lat', 'lon', 'month', 'year'])
-    prediction_k = temp_model.predict(input_df)[0]
-    return float(prediction_k)
+    return float(temp_model.predict(input_df)[0])
 
 def predict_precipitation_raw(lat: float, lng: float, month: int, year: int) -> float:
-    """Predicts precipitation and returns it in the model's raw unit (kg m-2 s-1)."""
     input_df = pd.DataFrame([[lat, lng, month, year]], columns=['lat', 'lon', 'month', 'year'])
-    prediction_raw = precip_model.predict(input_df)[0]
-    return float(prediction_raw)
+    return float(precip_model.predict(input_df)[0])
 
 def predict_radiation(lat: float, lng: float, month: int, year: int) -> float:
-    """Predicts radiation and returns it in W m-2."""
     input_df = pd.DataFrame([[lat, lng, month, year]], columns=['lat', 'lon', 'month', 'year'])
-    prediction = rad_model.predict(input_df)[0]
-    return round(float(prediction), 1)
+    return round(float(rad_model.predict(input_df)[0]), 1)
+
+# <-- NEW: Prediction function for the phenophase timing model
+def predict_phenophase_timing(species: str, phenophase: str, biome: str, t2m: float, prectotcorr: float, swgdn: float) -> str:
+    """Predicts if a plant's phenophase is early or late."""
+    try:
+        s_code = species_cats.index(species)
+        p_code = phenophase_cats.index(phenophase)
+        b_code = biome_cats.index(biome)
+    except ValueError:
+        return "" # If species/phenophase/biome is not in model's vocabulary, return empty
+
+    row = pd.DataFrame({
+        'Species_Encoded': [s_code], 'Phenophase_Encoded': [p_code], 'Biome_Encoded': [b_code],
+        'T2M': [t2m], 'PRECTOTCORR': [prectotcorr], 'SWGDN': [swgdn]
+    })
+
+    lateness = plant_timing_model.predict(row)[0]
+    lateness_days = round(abs(lateness))
+
+    if lateness_days <= 1:
+        return "On time"
+    elif lateness > 1:
+        return f"{lateness_days} days late"
+    else: # lateness < -1
+        return f"{lateness_days} days early"
+# <-- END NEW
 
 def predict_ecology_from_data(
-    biome_code: str, lat: float, lng: float, doy: int, 
+    biome_code: str, lat: float, lng: float, doy: int,
     temp_k: float, precip_raw: float, rad: float
 ) -> Dict:
-    """Performs full feature engineering and runs the ecology prediction."""
     if not combined_model:
         raise RuntimeError("ML models are not loaded. Cannot perform prediction.")
 
-    # 1. Feature Engineering
     doy_sin = np.sin(2 * np.pi * doy / 365.25)
     doy_cos = np.cos(2 * np.pi * doy / 365.25)
     temp_x_radiation = temp_k * rad
-    drought_index = temp_k / (precip_raw + 1) 
+    drought_index = temp_k / (precip_raw + 1)
 
     data = {
-        'latitude': lat,
-        'longitude': lng,
-        'T2M': temp_k,
-        'PRECTOTCORR': precip_raw,
-        'SWGDN': rad,
-        'doy_sin': doy_sin,
-        'doy_cos': doy_cos,
-        'temp_x_radiation': temp_x_radiation,
-        'drought_index': drought_index,
+        'latitude': lat, 'longitude': lng, 'T2M': temp_k, 'PRECTOTCORR': precip_raw, 'SWGDN': rad,
+        'doy_sin': doy_sin, 'doy_cos': doy_cos, 'temp_x_radiation': temp_x_radiation, 'drought_index': drought_index,
     }
-
     for code in ALL_BIOME_CODES:
         data[f'biome_cat_{code}'] = 1 if code == biome_code else 0
-    
-    # 2. Create and Order DataFrame
-    input_df = pd.DataFrame([data])
-    input_df = input_df[MODEL_FEATURE_ORDER] # Enforce exact column order
 
-    # 3. Run Prediction
+    input_df = pd.DataFrame([data])[MODEL_FEATURE_ORDER]
     encoded_result = combined_model.predict(input_df)[0]
     scenario_text = combined_encoder.inverse_transform([encoded_result])[0]
-    
-    # 4. Format Output
+
     try:
         phenophase, pest_scientific_name = [part.strip() for part in scenario_text.split('|')]
     except ValueError:
         logger.error(f"Could not parse scenario text: {scenario_text}")
         return {"species": [], "pests": []}
-    
+
     plant_scientific_names = scenario_to_plants.get(scenario_text, [])
     species_list = []
-    
-    # <-- CORRECTED: Safely access the nested 'plant_names' dictionary
+
+    # <-- MODIFICATION: Add timing prediction to each species
     plant_name_dict = name_lookups.get('plant_names', {})
     for plant_name in plant_scientific_names:
+        timing_pred = predict_phenophase_timing(
+            species=plant_name.strip(), phenophase=phenophase, biome=biome_code,
+            t2m=temp_k, prectotcorr=precip_raw, swgdn=rad
+        )
         species_list.append({
             'scientific_name': plant_name,
-            # <-- CORRECTED: Look up the stripped name in the nested dictionary
             'common_name': plant_name_dict.get(plant_name.strip(), "Unknown"),
-            'phenophase': phenophase
+            'phenophase': phenophase,
+            'timing_prediction': timing_pred
         })
-        
-    # <-- CORRECTED: Safely access the nested 'pest_names' dictionary
+    # <-- END MODIFICATION
+
     pest_name_dict = name_lookups.get('pest_names', {})
     pests_list = [{
         'scientific_name_pest': pest_scientific_name,
-        # <-- CORRECTED: Look up the stripped name in the nested dictionary
         'common_name_pest': pest_name_dict.get(pest_scientific_name.strip(), "Unknown")
     }]
     return {"species": species_list, "pests": pests_list}
@@ -227,7 +235,7 @@ async def analyze_area_by_biome(request: AnalysisRequest):
                     if biome_code not in biome_point_groups:
                         biome_point_groups[biome_code] = {"name": biome_name, "points": []}
                     biome_point_groups[biome_code]["points"].append((point_lng, point_lat))
-        
+
         if not biome_point_groups:
             raise HTTPException(status_code=400, detail="No valid biomes found in the selected area.")
 
@@ -237,7 +245,7 @@ async def analyze_area_by_biome(request: AnalysisRequest):
 
         for biome_code, data in biome_point_groups.items():
             if not data["points"]: continue
-            
+
             # a) Find the representative center point (centroid) of the biome
             biome_multipoint = MultiPoint(data["points"])
             biome_centroid = biome_multipoint.centroid
@@ -247,7 +255,7 @@ async def analyze_area_by_biome(request: AnalysisRequest):
             temp_k = predict_temperature_k(rep_lat, rep_lng, request.month, request.year)
             precip_raw = predict_precipitation_raw(rep_lat, rep_lng, request.month, request.year)
             rad = predict_radiation(rep_lat, rep_lng, request.month, request.year)
-            
+
             # c) Run the full ecology prediction with engineered features
             species_result = predict_ecology_from_data(
                 biome_code=biome_code,
@@ -258,7 +266,7 @@ async def analyze_area_by_biome(request: AnalysisRequest):
                 precip_raw=precip_raw,
                 rad=rad
             )
-            
+
             # d) Convert units for user-facing display ONLY
             temp_c_display = round(temp_k - 273.15, 1)
             precip_mm_day_display = round(precip_raw * 86400, 1)
@@ -268,8 +276,8 @@ async def analyze_area_by_biome(request: AnalysisRequest):
                 "biome_name": data["name"],
                 "location": {"lat": rep_lat, "lng": rep_lng},
                 "climate_data": {
-                    "temperature": temp_c_display, 
-                    "precipitation": precip_mm_day_display, 
+                    "temperature": temp_c_display,
+                    "precipitation": precip_mm_day_display,
                     "radiation": rad
                 },
                 "species": species_result["species"],
@@ -278,5 +286,5 @@ async def analyze_area_by_biome(request: AnalysisRequest):
 
         return {"results": analysis_results}
     except Exception as e:
-        logger.exception(f"Analysis failed: {e}") 
+        logger.exception(f"Analysis failed: {e}")
         raise HTTPException(status_code=500, detail="An error occurred during analysis.")
